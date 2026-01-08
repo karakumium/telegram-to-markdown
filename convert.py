@@ -1,145 +1,177 @@
+#!/usr/bin/env python3
 import json
-import os
-from datetime import datetime
-from distutils.dir_util import copy_tree
-from collections import defaultdict
-
-import typer
-from typing import List, Optional
-app = typer.Typer()
+import shutil
+import sys
+from pathlib import Path
+from typing import Dict, Any, List
 
 
-def escape(text, hashtag_whitelist):
-    # I want to escape multiple special markdown characters and also the special characters of the Obsidian-flavored markdown, such as tilde and dollar signs
-    special_signs = '*', '_', '~', '=', '$', '%'
-    for sign in special_signs:
-        text = text.replace(sign, f'\\{sign}')
-    # also escape wikilinks-style character combinations
-    text = text.replace('[[', f'\\[\\[')
-    text = text.replace(']]', f'\\]\\]')
-    text = text.replace('((', f'\\(\\(')
-    text = text.replace('))', f'\\)\\)')
-    
-    hash_locations = [i for i, letter in enumerate(text) if letter == '#']
-    for hash_loc in reversed(hash_locations):
-        to_escape = True
-        for term in hashtag_whitelist:
-            if text[hash_loc+1 : hash_loc+1+len(term)] == term \
-            and (hash_loc+1+len(term) >= len(text) or \
-                     text[hash_loc+1+len(term)].isspace()):
-                to_escape = False
-                break
-        if to_escape:
-            # if a hashtag is not in the whitelist, escape the hash sign
-            text = text[:hash_loc] + '\\' + text[hash_loc:]
+# =========================
+# Telegram export handling
+# =========================
 
-    return text
+def extract_chats(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if 'messages' in data and 'name' in data:
+        return [data]
 
-def get_journal_entry(msg, inner_assets_dir, hashtag_whitelist):
-    """Convert a particular message into a part of a journal dated with the date of the message.
-    """
-    journal_entry = '- '
-    
-    if 'file' in msg:
-        file_dir = msg['file']
-        filename = file_dir.split('/')[-1]
-        # not using os.path.join for consistency with the existing path format
-        s = f'[{filename}]({inner_assets_dir + "/" + file_dir.replace(" ", "%20")})'  # insert a file link
-        journal_entry += s + ' '
+    if 'chats' in data and 'list' in data['chats']:
+        return data['chats']['list']
 
-    if 'photo' in msg:
-        file_dir = msg['photo']
-        filename = file_dir.split('/')[-1]
-        # not using os.path.join for consistency with the existing path format
-        s = f'![{filename}]({inner_assets_dir + "/" + file_dir.replace(" ", "%20")})'  # embed a photo
-        journal_entry += s + ' '
-    
-    if 'text' in msg:
-        if type(msg['text']) == str:
-            journal_entry += escape(msg['text'], hashtag_whitelist)
-            if journal_entry[-1:] != '\n':
-                journal_entry += ' '
-        elif type(msg['text']) == list:
-            for entry in msg['text']:
-                if type(entry) == str:
-                    journal_entry += escape(entry, hashtag_whitelist)
-                elif type(entry) == dict:
-                    if entry['type'] in ['phone', 'bank_card', 'email', 'mention', 'underline']:
-                        journal_entry += entry['text']
-                    elif entry['type'] == 'link':
-                        journal_entry += entry['text'].replace(' ', '%20')
-                    elif entry['type'] == 'italic':
-                        journal_entry += '*' + escape(entry['text'], hashtag_whitelist) + '*'
-                    elif entry['type'] in ['code', 'cashtag', 'pre']:
-                        journal_entry += '`' + escape(entry['text'], hashtag_whitelist) + '`'
-                    elif entry['type'] == 'bold':
-                        journal_entry += '**' + escape(entry['text'], hashtag_whitelist) + '**'
-                    elif entry['type'] == 'text_link':
-                        journal_entry += escape(entry['text'], hashtag_whitelist) + ' ' + entry['href'].replace(' ', '%20')
-                    elif entry['type'] == 'hashtag':
-                        journal_entry += escape(entry['text'], hashtag_whitelist)
-                else:
-                    raise Exception
-                if journal_entry[-1:] != '\n':
-                    journal_entry += ' '
-        else:
-            raise Exception
-            
-    journal_entry = journal_entry.replace('\n', '\n\t')
-    if len(journal_entry) > 0:
-        journal_entry = journal_entry[:-1]  # remove the last added whitespace
-        
-    return journal_entry
+    if 'dialogs' in data:
+        return data['dialogs']
 
-def get_journal(chat, inner_assets_dir, hashtag_whitelist):
-    journal = ''
-    for i, msg in enumerate(chat):
-        if msg['type'] != 'message':
+    raise ValueError('Unsupported Telegram export format')
+
+
+# =========================
+# Text rendering
+# =========================
+
+def render_text(text) -> str:
+    if isinstance(text, str):
+        return text.strip()
+
+    if not isinstance(text, list):
+        return ''
+
+    out = []
+
+    for part in text:
+        if isinstance(part, str):
+            out.append(part)
             continue
-        new_entry = get_journal_entry(msg, inner_assets_dir, hashtag_whitelist)
-        journal += new_entry
-        if i != len(chat)-1:
-            journal += '\n'
-    return journal
 
-@app.command()
-def convert(input_dir : str, output_dir : str,
-            hashtag_whitelist: Optional[List[str]] = typer.Argument(None)):
-    with open(os.path.join(input_dir, 'result.json'), encoding='utf8') as handle:
-        data = json.load(handle)
-    
-    # get the "Saved messages" chat
-    chats_list = data['chats']['list']
-    saved_messages_chats = [chat for chat in chats_list if chat['type'] == 'saved_messages']
-    assert len(saved_messages_chats) == 1
-    chat = saved_messages_chats[0]['messages']
-    
-    journals_dir = os.path.join(output_dir, 'journals')
-    inner_assets_dir = f'tg_import_{datetime.today().strftime("%Y-%m-%d")}'
-    assets_dir = os.path.join(output_dir, 'assets', inner_assets_dir)
-    
-    # create the file structure of a new markdown vault
-    os.makedirs(journals_dir, exist_ok=True)
-    os.makedirs(assets_dir, exist_ok=True)
-    res = copy_tree(os.path.join(input_dir, 'chats'), os.path.join(assets_dir, 'chats'))
-    
-    # create a dict mapping a date to indices of messages on that date
-    date_to_indices = defaultdict(list)
-    for i, msg in enumerate(chat):
-        cur_date = msg['date'][:10]
-        date_to_indices[cur_date].append(i)
-    
-    dates_and_ranges = [(key, min(val), max(val)+1) for key, val in date_to_indices.items()]
-    
-    for date, msg_i_start, msg_i_end in dates_and_ranges:
-        # journal means all messages for one day, formatted in markdown
-        journal = get_journal(chat[msg_i_start : msg_i_end],
-                              inner_assets_dir,
-                              hashtag_whitelist)
-        journal_path = os.path.join(journals_dir, f'{date}.md')
-        if len(journal) > 0:
-            with open(journal_path, 'w', encoding='utf8') as f:
-                f.write(journal)
-                
-if __name__ == "__main__":
-    app()
+        if not isinstance(part, dict):
+            continue
+
+        t = part.get('type')
+        v = part.get('text', '')
+
+        if t == 'bold':
+            out.append(f'**{v}**')
+        elif t == 'italic':
+            out.append(f'*{v}*')
+        elif t == 'underline':
+            out.append(f'__{v}__')
+        elif t == 'strikethrough':
+            out.append(f'~~{v}~~')
+        elif t == 'code':
+            out.append(f'`{v}`')
+        elif t == 'pre':
+            out.append(f'\n```\n{v}\n```\n')
+        elif t == 'blockquote':
+            for line in v.splitlines():
+                out.append(f'> {line}')
+            out.append('\n')
+        else:
+            out.append(v)
+
+    return ''.join(out).strip()
+
+
+# =========================
+# Media (Obsidian-ready)
+# =========================
+
+MEDIA_FIELDS = [
+    'photo',
+    'video',
+    'voice',
+    'audio',
+    'video_message',
+    'animation',
+    'sticker',
+    'file',
+]
+
+
+def handle_media(message: Dict[str, Any], input_dir: Path, attach_dir: Path) -> str:
+    for field in MEDIA_FIELDS:
+        if field not in message:
+            continue
+
+        rel = message[field]
+        if not isinstance(rel, str):
+            continue
+
+        src = input_dir / rel
+        if not src.exists():
+            return f'> ⚠️ media not found: {rel}\n'
+
+        attach_dir.mkdir(parents=True, exist_ok=True)
+        dst = attach_dir / src.name
+
+        if not dst.exists():
+            shutil.copy2(src, dst)
+
+        # Obsidian embed
+        return f'![[{dst.name}]]\n'
+
+    return ''
+
+
+# =========================
+# Chat conversion
+# =========================
+
+def convert_chat(chat: Dict[str, Any], input_dir: Path, output_dir: Path):
+    chat_name = chat.get('name', 'chat').replace('/', '_')
+    md_path = output_dir / f'{chat_name}.md'
+    attach_dir = output_dir / 'attachments'
+
+    with md_path.open('w', encoding='utf-8') as md:
+        md.write(f'# {chat_name}\n\n')
+
+        for msg in chat.get('messages', []):
+            if msg.get('type') == 'service':
+                continue
+
+            author = msg.get('from', 'Unknown')
+            date = msg.get('date', '')
+
+            md.write(f'## {author} — {date}\n\n')
+
+            media_md = handle_media(msg, input_dir, attach_dir)
+            text_md = render_text(msg.get('text'))
+
+            if media_md:
+                md.write(media_md)
+                if text_md:
+                    md.write(f'> {text_md}\n')
+
+            else:
+                if text_md:
+                    md.write(text_md + '\n')
+
+            md.write('\n---\n\n')
+
+
+# =========================
+# CLI
+# =========================
+
+def convert(input_dir: Path, output_dir: Path):
+    result = input_dir / 'result.json'
+    if not result.exists():
+        raise FileNotFoundError('result.json not found')
+
+    with result.open(encoding='utf-8') as f:
+        data = json.load(f)
+
+    chats = extract_chats(data)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for chat in chats:
+        convert_chat(chat, input_dir, output_dir)
+
+
+def main():
+    if len(sys.argv) != 4 or sys.argv[1] != 'convert':
+        print('Usage: python convert.py convert <input_dir> <output_dir>')
+        sys.exit(1)
+
+    convert(Path(sys.argv[2]), Path(sys.argv[3]))
+
+
+if __name__ == '__main__':
+    main()
