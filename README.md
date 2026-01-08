@@ -3,8 +3,8 @@
 This repository is a fork of  
 https://github.com/alexlyzhov/telegram-to-markdown
 
-The original project converts Telegram Desktop chat exports into Markdown adopted for Obsidian Vault.
-This fork modernizes the converter to support **new Telegram Desktop export formats (2024–2026)**.
+The original project converts Telegram Desktop chat exports into Markdown.
+This fork modernizes the converter to support **new Telegram Desktop export formats (2024–2026)** and adopts for Obsidian Vault.
 
 ---
 
